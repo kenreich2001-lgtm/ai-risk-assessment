@@ -43,6 +43,15 @@ from industry_profiles import (
     get_default_regulations,
     get_specializations,
 )
+from intake_builder import (
+    BUILDER_DATA_TYPES,
+    CAPABILITIES,
+    HUMAN_REVIEW_OPTIONS,
+    MODEL_PATTERNS,
+    PRIMARY_USER_GROUPS,
+    USE_CASE_TYPES,
+    build_use_case_description,
+)
 from intake_signals import (
     AUDIENCE_OPTIONS,
     AUTOMATION_OPTIONS,
@@ -68,9 +77,10 @@ TOOL_PURPOSE = (
 )
 
 INTAKE_INSTRUCTIONS = (
-    "**Before you submit:** set **industry**, **specialization**, **business function**, and **data / hosting / audience** "
+    "**Before you submit:** choose an **Assessment Setup Mode** (sample template, structured builder, or free text), then set "
+    "**industry**, **specialization**, **business function**, and **data / hosting / audience** "
     "(these add engine tags and a short technical block). Adjust **regulatory context** when specialization changes. "
-    "Then describe the AI use case. Optional sidebar tags still merge with derived tags. "
+    "Optional sidebar tags still merge with derived tags. "
     "This is **not** a legal compliance determination."
 )
 
@@ -92,13 +102,21 @@ If you are unsure of a tag name, **spell out the same idea in the use case descr
 
 GENERAL_USE_CASE_TIPS = """**Strong descriptions mention:** data types (PII/PHI/financial), **customer vs internal** audience, **tools/APIs** that change records or money, and **hosting** (e.g. Azure OpenAI)."""
 
-SAMPLE_USE_CASE_PLACEHOLDER = "Select a sample use case..."
+SAMPLE_USE_CASE_PLACEHOLDER = "Select a sample template..."
 
-SAMPLE_USE_CASES: dict[str, dict[str, str]] = {
+# Optional "regulations" lists use exact labels from ALL_REGULATION_LABELS.
+SAMPLE_USE_CASES: dict[str, dict] = {
     "Consumer bank underwriting assistant": {
         "industry": "Financial Services",
         "specialization": "Banking",
         "business_function": "Underwriting / Risk Decisioning",
+        "regulations": [
+            "FTC Safeguards Rule",
+            "GLBA",
+            "NIST AI RMF",
+            "PCI DSS",
+            "SOC 2",
+        ],
         "description": (
             "Hosted LLM assists underwriters by summarizing credit files, extracting employment and income signals, "
             "and drafting adverse-action explanations. Uses Azure OpenAI; prompts may include PII, credit attributes, "
@@ -109,6 +127,13 @@ SAMPLE_USE_CASES: dict[str, dict[str, str]] = {
         "industry": "Financial Services",
         "specialization": "Insurance",
         "business_function": "Claims / Case Management",
+        "regulations": [
+            "FTC Safeguards Rule",
+            "GLBA",
+            "HIPAA Privacy Rule",
+            "HIPAA Security Rule",
+            "SOC 2",
+        ],
         "description": (
             "Copilot triages first notice of loss: suggests reserves, flags fraud indicators, and drafts adjuster notes "
             "from FNOL text and images. May reference PHI for health lines. Third-party hosted model with retrieval over "
@@ -119,6 +144,12 @@ SAMPLE_USE_CASES: dict[str, dict[str, str]] = {
         "industry": "Healthcare",
         "specialization": "Provider",
         "business_function": "Clinical Operations",
+        "regulations": [
+            "HIPAA Privacy Rule",
+            "HIPAA Security Rule",
+            "NIST AI RMF",
+            "SOC 2",
+        ],
         "description": (
             "Ambient documentation assistant drafts SOAP-style notes from clinician–patient encounters. "
             "PHI in prompts and outputs; integrated with EHR. Clinicians review and sign every note; model is hosted "
@@ -129,6 +160,7 @@ SAMPLE_USE_CASES: dict[str, dict[str, str]] = {
         "industry": "Retail / E-Commerce",
         "specialization": "Customer Support Operations",
         "business_function": "Customer Support",
+        "regulations": ["CCPA / CPRA", "PCI DSS", "SOC 2"],
         "description": (
             "Customer-facing chatbot answers order status, returns, and loyalty questions using retrieval over policies "
             "and order APIs. Hosted LLM; may surface PII when customers authenticate. Human handoff for refunds and "
@@ -139,10 +171,50 @@ SAMPLE_USE_CASES: dict[str, dict[str, str]] = {
         "industry": "Professional Services",
         "specialization": "HR / Recruiting",
         "business_function": "Knowledge Management",
+        "regulations": ["CCPA / CPRA", "Employment data privacy context", "GDPR", "SOC 2"],
         "description": (
             "Internal assistant answers employees’ questions on benefits, leave, and workplace policies using Confluence "
             "and the HRIS handbook. Internal-only; responses include PII only when the employee asks about their own record. "
             "No hiring decisions; no automated actions against HR systems."
+        ),
+    },
+    "Payment fraud monitoring copilot": {
+        "industry": "Financial Services",
+        "specialization": "Payments / Fintech",
+        "business_function": "Fraud Detection / Investigations",
+        "regulations": ["FTC Safeguards Rule", "GLBA", "PCI DSS", "SOC 2"],
+        "description": (
+            "Analyst-facing copilot summarizes transaction and device signals, suggests investigation steps, and drafts "
+            "case narratives. Uses an external LLM in our VPC; prompts may include customer identifiers and payment metadata. "
+            "No automated account closure; investigators confirm escalations."
+        ),
+    },
+    "Engineering secure code copilot": {
+        "industry": "Technology",
+        "specialization": "SaaS / Enterprise Software",
+        "business_function": "Engineering / Product Development",
+        "regulations": ["GDPR", "NIST AI RMF", "SOC 2"],
+        "description": (
+            "IDE-integrated copilot suggests code and tests from internal repos and docs. Internal developers only; "
+            "may surface API keys or customer config if mis-pasted. Hosted third-party model with enterprise agreement; "
+            "human review required before merge to protected branches."
+        ),
+    },
+    "Regulatory policy Q&A assistant": {
+        "industry": "Financial Services",
+        "specialization": "Banking",
+        "business_function": "Compliance",
+        "regulations": [
+            "FTC Safeguards Rule",
+            "GLBA",
+            "NIST AI RMF",
+            "SOC 2",
+            "SOX",
+        ],
+        "description": (
+            "RAG assistant answers compliance officers’ questions over internal policies, regulatory memos, and exam "
+            "guidance. Internal use; outputs are advisory with mandatory human verification before supervisory or board "
+            "reporting. Retrieval over SharePoint and the policy library."
         ),
     },
 }
@@ -155,10 +227,19 @@ def _apply_sample_use_case() -> None:
     row = SAMPLE_USE_CASES.get(choice)
     if not row:
         return
-    st.session_state["gov_industry"] = row["industry"]
-    st.session_state["gov_specialization"] = row["specialization"]
+    ind = row["industry"]
+    spec = row["specialization"]
+    st.session_state["gov_industry"] = ind
+    st.session_state["gov_specialization"] = spec
     st.session_state["gov_business_function"] = row["business_function"]
     st.session_state["gov_use_case_desc"] = row["description"]
+    st.session_state["_reg_ctx"] = (ind, spec)
+    reg_list = row.get("regulations")
+    if reg_list:
+        allowed = frozenset(ALL_REGULATION_LABELS)
+        st.session_state["regs_selected"] = [x for x in reg_list if x in allowed]
+    else:
+        st.session_state["regs_selected"] = get_default_regulations(ind, spec)
 
 
 def _inject_styles() -> None:
@@ -466,7 +547,7 @@ _inject_styles()
 with st.sidebar:
     st.markdown("### Governance intake")
     st.caption(
-        "Set **enterprise context** in the main workspace, describe the use case, then submit. "
+        "Set **enterprise context** in the main workspace, choose **template**, **builder**, or **free text**, then submit. "
         "Optional tags here merge with **derived context tags** from industry and regulations."
     )
     with st.expander("Optional tags — when and how", expanded=False):
@@ -493,14 +574,23 @@ st.markdown(f"<p style='color:#475569;font-size:1rem;margin:0 0 0.75rem 0;'>{htm
 st.markdown('<p class="section-label">Governance intake — enterprise context</p>', unsafe_allow_html=True)
 st.markdown(INTAKE_INSTRUCTIONS)
 
-st.selectbox(
-    "Load Sample Use Case",
-    options=[SAMPLE_USE_CASE_PLACEHOLDER, *SAMPLE_USE_CASES.keys()],
-    key="gov_sample_use_case",
-    on_change=_apply_sample_use_case,
-    help="Prefills industry, specialization, business function, and the use case narrative for demos.",
+setup_mode = st.radio(
+    "Assessment Setup Mode",
+    options=("Sample Template", "Build Custom Use Case", "Free-Text Use Case"),
+    horizontal=True,
+    key="gov_setup_mode",
+    help="Sample templates load realistic demos; the builder composes prose from structured fields; free text is unconstrained.",
 )
-st.caption("Samples only change the form fields below—you can edit anything before running the assessment.")
+
+if setup_mode == "Sample Template":
+    st.selectbox(
+        "Load Sample Template",
+        options=[SAMPLE_USE_CASE_PLACEHOLDER, *SAMPLE_USE_CASES.keys()],
+        key="gov_sample_use_case",
+        on_change=_apply_sample_use_case,
+        help="Prefills industry, specialization, business function, regulatory context (where defined), and narrative.",
+    )
+    st.caption("Templates set the fields below—you can edit anything before assessing.")
 
 with st.expander("Tips for the use case description", expanded=False):
     st.markdown(GENERAL_USE_CASE_TIPS)
@@ -589,16 +679,71 @@ technical_intake_summary = format_technical_intake_summary(
     external_content,
 )
 
-st.subheader("Use case narrative")
-user_desc = st.text_area(
-    "Describe the AI use case for governance review",
-    height=170,
-    key="gov_use_case_desc",
-    placeholder=(
-        "Example: Hosted LLM copilot for service agents with read/write to CRM; may suggest refunds; "
-        "chats can contain account numbers and order history…"
-    ),
-)
+if setup_mode == "Build Custom Use Case":
+    st.subheader("Structured use case builder")
+    st.caption(
+        "Compose a narrative from structured choices. **Industry**, **specialization**, and **business function** above "
+        "are included in the generated text. Align **Data, hosting & behavior** with the builder for consistent tags."
+    )
+    b_left, b_right = st.columns(2)
+    with b_left:
+        builder_use_case_type = st.selectbox("Use Case Type", USE_CASE_TYPES, key="gov_builder_uc_type")
+        builder_primary_users = st.selectbox("Primary User Group", PRIMARY_USER_GROUPS, key="gov_builder_primary_users")
+        builder_model_pattern = st.selectbox("Model Pattern", MODEL_PATTERNS, key="gov_builder_model_pattern")
+        builder_human_review = st.selectbox(
+            "Human Review Requirement",
+            HUMAN_REVIEW_OPTIONS,
+            key="gov_builder_human_review",
+        )
+    with b_right:
+        builder_data_types_uc = st.multiselect(
+            "Data Types Used",
+            options=list(BUILDER_DATA_TYPES),
+            default=[],
+            key="gov_builder_data_types_uc",
+        )
+        builder_capabilities = st.multiselect(
+            "Capabilities",
+            options=list(CAPABILITIES),
+            default=[],
+            key="gov_builder_capabilities",
+        )
+
+    builder_narrative = build_use_case_description(
+        industry,
+        specialization,
+        business_function,
+        builder_use_case_type,
+        builder_primary_users,
+        list(builder_data_types_uc),
+        builder_model_pattern,
+        list(builder_capabilities),
+        builder_human_review,
+    )
+    narrative_plain = builder_narrative.strip()
+
+    with st.container(border=True):
+        st.markdown("##### Generated use case preview")
+        st.caption("This prose is submitted with structured context and technical intake—same path as a typed narrative.")
+        st.code(builder_narrative, language=None)
+
+else:
+    st.subheader("Use case narrative")
+    if setup_mode == "Sample Template":
+        st.caption("Edit the narrative after loading a template, or write your own.")
+    else:
+        st.caption("Free-text entry: structured fields above still add tags and the technical block sent to the engine.")
+
+    user_desc = st.text_area(
+        "Describe the AI use case for governance review",
+        height=170,
+        key="gov_use_case_desc",
+        placeholder=(
+            "Example: Hosted LLM copilot for service agents with read/write to CRM; may suggest refunds; "
+            "chats can contain account numbers and order history…"
+        ),
+    )
+    narrative_plain = user_desc.strip()
 
 with st.container(border=True):
     st.markdown("**Derived context preview** (what will shape tags and reviewer emphasis)")
@@ -640,15 +785,18 @@ tech_block = build_technical_intake_block(
     automation,
     external_content,
 )
-use_case_full = f"{enrichment_block}\n\n{tech_block}\n\n{user_desc.strip()}".strip()
+use_case_full = f"{enrichment_block}\n\n{tech_block}\n\n{narrative_plain}".strip()
 
 if not run:
     st.info(
-        "Complete **industry**, **specialization**, **business function**, **data/hosting/audience**, and **regulatory context**, "
-        "describe the use case, optionally add **tags** in the sidebar, then click **Assess use case for governance review**."
+        "Choose a setup mode, complete **industry**, **specialization**, **business function**, **data/hosting/audience**, "
+        "and **regulatory context**, add a use case via **template**, **builder**, or **free text**, optionally add sidebar **tags**, "
+        "then click **Assess use case for governance review**."
     )
-elif not user_desc.strip():
-    st.warning("Please enter a **use case description** before running the assessment (structured context alone is not enough).")
+elif not narrative_plain:
+    st.warning(
+        "Add a use case narrative (**free text** or **sample template**) or complete the **structured builder** before running the assessment."
+    )
 else:
     now = datetime.now(timezone.utc)
     assessment_id = generate_use_case_id(now)
@@ -809,7 +957,7 @@ else:
     # --- 4 · Use case summary ---
     st.subheader("4 · Use case summary")
     with st.container(border=True):
-        desc_clip = (user_desc.strip()[:400] + "…") if len(user_desc.strip()) > 400 else user_desc.strip()
+        desc_clip = (narrative_plain[:400] + "…") if len(narrative_plain) > 400 else narrative_plain
         st.markdown("**Use case narrative (excerpt)**")
         st.markdown(desc_clip or "—")
         with st.expander("Full text sent to the engine (structured context + narrative)", expanded=False):
