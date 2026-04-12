@@ -10,6 +10,9 @@ from governance_workflow import (
     determine_review_path,
     determine_risk_tier,
     generate_use_case_id,
+    get_launch_recommendation,
+    get_required_reviewers,
+    get_risk_tier_rationale_bullets,
 )
 
 
@@ -74,6 +77,67 @@ class TestRationale(unittest.TestCase):
         )
         self.assertIn("High", r)
         self.assertIn("Other AI Use Case", r)
+
+
+class TestRequiredReviewers(unittest.TestCase):
+    def test_always_governance_and_owner(self) -> None:
+        roles = get_required_reviewers(
+            risk_tier="Low",
+            business_function="Knowledge Management",
+            regulation_labels=[],
+            tags=["internal_only"],
+        )
+        self.assertEqual(roles[0], "AI Governance")
+        self.assertEqual(roles[-1], "Business Owner")
+
+    def test_high_tier_adds_model_validation(self) -> None:
+        roles = get_required_reviewers(
+            risk_tier="High",
+            business_function="Knowledge Management",
+            regulation_labels=["GDPR"],
+            tags=["pii"],
+        )
+        self.assertIn("Model Validation", roles)
+        self.assertIn("Security", roles)
+
+
+class TestLaunchRecommendation(unittest.TestCase):
+    def test_not_ready_when_no_controls(self) -> None:
+        r = get_launch_recommendation(
+            risk_tier="Medium",
+            readiness_opinion="Complete required-control definitions for this use case",
+            open_remediation_count=0,
+        )
+        self.assertEqual(r, "Not ready")
+
+    def test_ready_when_flag_set_low_path(self) -> None:
+        r = get_launch_recommendation(
+            risk_tier="Low",
+            readiness_opinion="Required controls specified; evidence review flag set",
+            open_remediation_count=0,
+        )
+        self.assertEqual(r, "Ready for standard review")
+
+    def test_high_escalates(self) -> None:
+        r = get_launch_recommendation(
+            risk_tier="High",
+            readiness_opinion="Document evidence specifications per required control",
+            open_remediation_count=0,
+        )
+        self.assertEqual(r, "Escalate")
+
+
+class TestTierRationaleBullets(unittest.TestCase):
+    def test_length_between_three_and_five(self) -> None:
+        bullets = get_risk_tier_rationale_bullets(
+            "internal wiki search",
+            ["internal_knowledge", "retrieval"],
+            regulation_label_count=0,
+            business_function="Knowledge Management",
+            final_tier="Medium",
+        )
+        self.assertGreaterEqual(len(bullets), 3)
+        self.assertLessEqual(len(bullets), 5)
 
 
 if __name__ == "__main__":

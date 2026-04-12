@@ -25,6 +25,9 @@ from governance_workflow import (
     determine_review_path,
     format_assessment_timestamp,
     generate_use_case_id,
+    get_launch_recommendation,
+    get_required_reviewers,
+    get_risk_tier_rationale_bullets,
     governance_export_row,
 )
 from industry_profiles import (
@@ -88,6 +91,74 @@ If you are unsure of a tag name, **spell out the same idea in the use case descr
 """
 
 GENERAL_USE_CASE_TIPS = """**Strong descriptions mention:** data types (PII/PHI/financial), **customer vs internal** audience, **tools/APIs** that change records or money, and **hosting** (e.g. Azure OpenAI)."""
+
+SAMPLE_USE_CASE_PLACEHOLDER = "Select a sample use case..."
+
+SAMPLE_USE_CASES: dict[str, dict[str, str]] = {
+    "Consumer bank underwriting assistant": {
+        "industry": "Financial Services",
+        "specialization": "Banking",
+        "business_function": "Underwriting / Risk Decisioning",
+        "description": (
+            "Hosted LLM assists underwriters by summarizing credit files, extracting employment and income signals, "
+            "and drafting adverse-action explanations. Uses Azure OpenAI; prompts may include PII, credit attributes, "
+            "and co-applicant data. A human underwriter must approve any decision communicated to the applicant."
+        ),
+    },
+    "Insurance claims triage copilot": {
+        "industry": "Financial Services",
+        "specialization": "Insurance",
+        "business_function": "Claims / Case Management",
+        "description": (
+            "Copilot triages first notice of loss: suggests reserves, flags fraud indicators, and drafts adjuster notes "
+            "from FNOL text and images. May reference PHI for health lines. Third-party hosted model with retrieval over "
+            "claims history; no automatic payouts—staff confirms outcomes."
+        ),
+    },
+    "Clinical documentation assistant": {
+        "industry": "Healthcare",
+        "specialization": "Provider",
+        "business_function": "Clinical Operations",
+        "description": (
+            "Ambient documentation assistant drafts SOAP-style notes from clinician–patient encounters. "
+            "PHI in prompts and outputs; integrated with EHR. Clinicians review and sign every note; model is hosted "
+            "in our cloud tenant with BAA-covered subprocessors."
+        ),
+    },
+    "Customer support chatbot": {
+        "industry": "Retail / E-Commerce",
+        "specialization": "Customer Support Operations",
+        "business_function": "Customer Support",
+        "description": (
+            "Customer-facing chatbot answers order status, returns, and loyalty questions using retrieval over policies "
+            "and order APIs. Hosted LLM; may surface PII when customers authenticate. Human handoff for refunds and "
+            "account security changes."
+        ),
+    },
+    "Employee HR knowledge assistant": {
+        "industry": "Professional Services",
+        "specialization": "HR / Recruiting",
+        "business_function": "Knowledge Management",
+        "description": (
+            "Internal assistant answers employees’ questions on benefits, leave, and workplace policies using Confluence "
+            "and the HRIS handbook. Internal-only; responses include PII only when the employee asks about their own record. "
+            "No hiring decisions; no automated actions against HR systems."
+        ),
+    },
+}
+
+
+def _apply_sample_use_case() -> None:
+    choice = st.session_state.get("gov_sample_use_case")
+    if not choice or choice == SAMPLE_USE_CASE_PLACEHOLDER:
+        return
+    row = SAMPLE_USE_CASES.get(choice)
+    if not row:
+        return
+    st.session_state["gov_industry"] = row["industry"]
+    st.session_state["gov_specialization"] = row["specialization"]
+    st.session_state["gov_business_function"] = row["business_function"]
+    st.session_state["gov_use_case_desc"] = row["description"]
 
 
 def _inject_styles() -> None:
@@ -422,6 +493,15 @@ st.markdown(f"<p style='color:#475569;font-size:1rem;margin:0 0 0.75rem 0;'>{htm
 st.markdown('<p class="section-label">Governance intake — enterprise context</p>', unsafe_allow_html=True)
 st.markdown(INTAKE_INSTRUCTIONS)
 
+st.selectbox(
+    "Load Sample Use Case",
+    options=[SAMPLE_USE_CASE_PLACEHOLDER, *SAMPLE_USE_CASES.keys()],
+    key="gov_sample_use_case",
+    on_change=_apply_sample_use_case,
+    help="Prefills industry, specialization, business function, and the use case narrative for demos.",
+)
+st.caption("Samples only change the form fields below—you can edit anything before running the assessment.")
+
 with st.expander("Tips for the use case description", expanded=False):
     st.markdown(GENERAL_USE_CASE_TIPS)
 
@@ -624,6 +704,25 @@ else:
     rem_rows = ar.get("required_remediation_actions") or []
     table = result.get("mapping_table") or []
 
+    tier_rationale_bullets = get_risk_tier_rationale_bullets(
+        use_case_full,
+        tags_list,
+        regulation_label_count=len(regs_selected),
+        business_function=business_function,
+        final_tier=risk_tier,
+    )
+    required_reviewers = get_required_reviewers(
+        risk_tier=risk_tier,
+        business_function=business_function,
+        regulation_labels=regs_selected,
+        tags=tags_list,
+    )
+    launch_recommendation = get_launch_recommendation(
+        risk_tier=risk_tier,
+        readiness_opinion=str(conc.get("readiness_opinion") or ""),
+        open_remediation_count=len(rem_rows),
+    )
+
     # --- 1 · Assessment metadata (at-a-glance strip) ---
     st.subheader("1 · Assessment metadata")
     with st.container(border=True):
@@ -632,9 +731,10 @@ else:
         a1.metric("Use case ID", assessment_id)
         a2.metric("Timestamp (UTC)", assessment_ts)
         a3.metric("Status", DEFAULT_ASSESSMENT_STATUS)
-        b1, b2 = st.columns([1, 2])
+        b1, b2, b3 = st.columns(3)
         b1.metric("Risk tier (triage)", risk_tier)
         b2.markdown(f"**Recommended review path**  \n{review_path}")
+        b3.markdown(f"**Launch recommendation (demo)**  \n{html.escape(launch_recommendation)}")
 
     # --- 2 · Governance triage summary ---
     st.subheader("2 · Governance triage summary")
@@ -643,6 +743,27 @@ else:
             "Structured intake plus rule-based tiering (transparent bumps for regulation count and certain business functions). "
             "Catalog **overall risk** from the engine may differ; both appear under the use case summary."
         )
+        st.markdown("##### Risk tier rationale")
+        for line in tier_rationale_bullets:
+            st.markdown(f"- {line}")
+        st.divider()
+        st.markdown("##### Required reviewers")
+        st.caption("Illustrative roster from tier, tags, and regulatory context—adjust to your operating model.")
+        st.markdown(
+            "\n".join(f"- **{html.escape(r)}**" for r in required_reviewers),
+            unsafe_allow_html=True,
+        )
+        st.divider()
+        st.markdown("##### Launch recommendation")
+        if launch_recommendation == "Ready for standard review":
+            st.success(launch_recommendation)
+        elif launch_recommendation == "Not ready":
+            st.error(launch_recommendation)
+        elif launch_recommendation == "Escalate":
+            st.warning(launch_recommendation)
+        else:
+            st.info(launch_recommendation)
+        st.divider()
         g1, g2, g3 = st.columns(3)
         g1.metric("Use case ID", assessment_id)
         g2.metric("Timestamp (UTC)", assessment_ts)

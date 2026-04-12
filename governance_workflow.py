@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime, timezone
+from typing import Sequence
 
 # ---------------------------------------------------------------------------
 # Tier rules (documented for maintainability)
@@ -204,6 +205,198 @@ def determine_review_path(risk_tier: str) -> str:
     if tier == "High":
         return "Governance + Security + Model Validation Review"
     return "Governance + Security Review"
+
+
+def get_required_reviewers(
+    *,
+    risk_tier: str,
+    business_function: str,
+    regulation_labels: Sequence[str],
+    tags: Sequence[str] | None,
+) -> list[str]:
+    """
+    Demo-oriented reviewer roster from a fixed role catalog, driven by tier, tags, and regulatory context.
+    Order is stable for display.
+    """
+    tier = (risk_tier or "").strip().title()
+    t = _tagset(tags)
+    regs = list(regulation_labels or [])
+    reg_blob = " ".join(r.lower() for r in regs)
+
+    reviewers: list[str] = ["AI Governance"]
+
+    if tier in ("Medium", "High") or t & {
+        "customer_facing",
+        "customer_support_bot",
+        "agentic_tools",
+        "third_party_model",
+        "action_execution",
+    }:
+        reviewers.append("Security")
+
+    if t & {"pii", "phi"} or any(
+        k in reg_blob for k in ("gdpr", "ccpa", "hipaa", "glba", "ferpa", "coppa", "privacy")
+    ):
+        reviewers.append("Privacy")
+
+    if regs or "regulated" in t:
+        reviewers.append("Compliance")
+
+    high_material_functions = {
+        "Underwriting / Risk Decisioning",
+        "Clinical Operations",
+        "Fraud Detection / Investigations",
+        "Executive Decision Support",
+        "Legal",
+        "Quality Assurance",
+    }
+    if (
+        tier == "High"
+        or business_function in high_material_functions
+        or t & {"high_stakes", "financial_services", "phi", "healthcare", "bias_sensitive"}
+    ):
+        reviewers.append("Model Validation")
+
+    reviewers.append("Business Owner")
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for role in reviewers:
+        if role not in seen:
+            seen.add(role)
+            out.append(role)
+    return out
+
+
+def get_launch_recommendation(
+    *,
+    risk_tier: str,
+    readiness_opinion: str,
+    open_remediation_count: int,
+) -> str:
+    """
+    Single headline for demos, derived from triage tier, engine readiness wording, and open remediation rows.
+    """
+    tier = (risk_tier or "").strip().title()
+    op = (readiness_opinion or "").strip()
+    op_l = op.lower()
+    n_rem = int(open_remediation_count)
+
+    if not op or op == "—":
+        return "Conditionally ready pending remediation"
+
+    if "complete required-control definitions" in op_l:
+        return "Not ready"
+
+    if "additional controls must be implemented prior to deployment" in op_l:
+        return "Not ready"
+
+    if tier == "High":
+        if n_rem > 0 or "additional controls and remediations must be completed" in op_l:
+            return "Escalate"
+        if "required controls and remediation must be completed" in op_l:
+            return "Escalate"
+        if "document evidence specifications" in op_l:
+            return "Escalate"
+        if "required controls specified; evidence review flag set" in op_l:
+            return "Conditionally ready pending remediation"
+        return "Escalate"
+
+    if n_rem > 0:
+        return "Conditionally ready pending remediation"
+
+    if (
+        "document evidence specifications" in op_l
+        or "additional controls and remediations must be completed" in op_l
+        or "required controls and remediation must be completed" in op_l
+    ):
+        return "Conditionally ready pending remediation"
+
+    if "required controls specified; evidence review flag set" in op_l:
+        return "Ready for standard review"
+
+    return "Conditionally ready pending remediation"
+
+
+def get_risk_tier_rationale_bullets(
+    use_case_text: str,
+    tags: Sequence[str] | None,
+    *,
+    regulation_label_count: int,
+    business_function: str,
+    final_tier: str,
+) -> list[str]:
+    """
+    Three to five bullets explaining triage tier, aligned with `compute_enriched_tier` / base `determine_risk_tier` rules.
+    """
+    base = determine_risk_tier(use_case_text, list(tags or []))
+    t = _tagset(tags)
+    text_l = (use_case_text or "").lower()
+    bullets: list[str] = [
+        f"Baseline sensitivity from **tags and narrative** is **{base}** before enterprise context adjustments."
+    ]
+
+    if base == "High":
+        tag_hits = sorted(t & _HIGH_TAGS)
+        if tag_hits:
+            shown = ", ".join(tag_hits[:8])
+            bullets.append(f"**High-tier tags** present include: {shown}.")
+        frag = _text_hits_fragments(text_l, _HIGH_TEXT_FRAGMENTS)
+        if frag:
+            bullets.append(
+                "**Narrative** matches patterns associated with customer channels, sensitive data, hosted models, or automated actions."
+            )
+    elif base == "Medium":
+        if t & _MEDIUM_TAGS or _text_hits_fragments(text_l, _MEDIUM_TEXT_FRAGMENTS):
+            bullets.append(
+                "**Copilot**, retrieval, or internal generative patterns justify at least **medium** scrutiny when no high-tier triggers apply."
+            )
+    else:
+        if not (t & _HIGH_TAGS) and not _text_hits_fragments(text_l, _HIGH_TEXT_FRAGMENTS):
+            bullets.append("**No** high-sensitivity tag or narrative triggers fired; default posture is **low** unless context bumps apply.")
+
+    rc = int(regulation_label_count)
+    if rc >= 6:
+        bullets.append(
+            f"**{rc}** regulatory / standards selections imply a **broad** control surface and drive a **stronger** minimum tier."
+        )
+    elif rc >= 4:
+        bullets.append(
+            f"**{rc}** regulatory / standards selections increase expected oversight and can **raise** the minimum tier."
+        )
+
+    high_func = {
+        "Underwriting / Risk Decisioning",
+        "Clinical Operations",
+        "Fraud Detection / Investigations",
+        "Executive Decision Support",
+        "Legal",
+        "Quality Assurance",
+    }
+    if business_function in high_func:
+        bullets.append(
+            f"**{business_function}** is classified as a **higher-materiality** business function for AI governance."
+        )
+    elif business_function in {"Security Operations", "Compliance", "Finance"}:
+        bullets.append(
+            f"**{business_function}** expects **cross-functional** security and control depth beyond a minimal review."
+        )
+
+    bullets.append(f"**Assigned triage tier: {final_tier}** — use this for forum routing alongside the catalog risk view.")
+
+    # Keep 3–5 bullets: drop middle extras if needed, always keep first and last (tier summary)
+    if len(bullets) > 5:
+        keep_first = bullets[0]
+        summary = bullets[-1]
+        middle = bullets[1:-1]
+        trimmed = middle[:3] if len(middle) > 3 else middle
+        bullets = [keep_first, *trimmed, summary]
+    if len(bullets) < 3:
+        bullets.insert(
+            -1,
+            "Industry, specialization, and technical intake tags merge with your narrative inside the **existing** assessment engine.",
+        )
+    return bullets[:5]
 
 
 def build_triage_rationale(
