@@ -104,6 +104,11 @@ GENERAL_USE_CASE_TIPS = """**Strong descriptions mention:** data types (PII/PHI/
 
 SAMPLE_USE_CASE_PLACEHOLDER = "Select a sample template..."
 
+# Canonical editable narrative for the assessment engine (widget + programmatic updates).
+SS_USE_CASE_DESCRIPTION = "use_case_description"
+SS_LAST_SETUP_MODE = "last_setup_mode"
+SS_LAST_SELECTED_SAMPLE = "last_selected_sample"
+
 # Optional "regulations" lists use exact labels from ALL_REGULATION_LABELS.
 SAMPLE_USE_CASES: dict[str, dict] = {
     "Consumer bank underwriting assistant": {
@@ -232,7 +237,8 @@ def _apply_sample_use_case() -> None:
     st.session_state["gov_industry"] = ind
     st.session_state["gov_specialization"] = spec
     st.session_state["gov_business_function"] = row["business_function"]
-    st.session_state["gov_use_case_desc"] = row["description"]
+    st.session_state[SS_USE_CASE_DESCRIPTION] = row["description"]
+    st.session_state[SS_LAST_SELECTED_SAMPLE] = choice
     st.session_state["_reg_ctx"] = (ind, spec)
     reg_list = row.get("regulations")
     if reg_list:
@@ -683,7 +689,7 @@ if setup_mode == "Build Custom Use Case":
     st.subheader("Structured use case builder")
     st.caption(
         "Compose a narrative from structured choices. **Industry**, **specialization**, and **business function** above "
-        "are included in the generated text. Align **Data, hosting & behavior** with the builder for consistent tags."
+        "are included in the generated draft. Align **Data, hosting & behavior** with the builder for consistent tags."
     )
     b_left, b_right = st.columns(2)
     with b_left:
@@ -719,31 +725,68 @@ if setup_mode == "Build Custom Use Case":
         builder_model_pattern,
         list(builder_capabilities),
         builder_human_review,
-    )
-    narrative_plain = builder_narrative.strip()
-
-    with st.container(border=True):
-        st.markdown("##### Generated use case preview")
-        st.caption("This prose is submitted with structured context and technical intake—same path as a typed narrative.")
-        st.code(builder_narrative, language=None)
-
+    ).strip()
 else:
-    st.subheader("Use case narrative")
-    if setup_mode == "Sample Template":
-        st.caption("Edit the narrative after loading a template, or write your own.")
-    else:
-        st.caption("Free-text entry: structured fields above still add tags and the technical block sent to the engine.")
+    builder_narrative = None
 
-    user_desc = st.text_area(
-        "Describe the AI use case for governance review",
-        height=170,
-        key="gov_use_case_desc",
-        placeholder=(
-            "Example: Hosted LLM copilot for service agents with read/write to CRM; may suggest refunds; "
-            "chats can contain account numbers and order history…"
-        ),
+st.session_state.setdefault(SS_USE_CASE_DESCRIPTION, "")
+if "gov_use_case_desc" in st.session_state:
+    _legacy_desc = st.session_state.pop("gov_use_case_desc", "")
+    if _legacy_desc and not str(st.session_state.get(SS_USE_CASE_DESCRIPTION, "")).strip():
+        st.session_state[SS_USE_CASE_DESCRIPTION] = _legacy_desc
+
+if SS_LAST_SETUP_MODE not in st.session_state:
+    st.session_state[SS_LAST_SETUP_MODE] = setup_mode
+    if setup_mode == "Build Custom Use Case" and builder_narrative:
+        if not st.session_state[SS_USE_CASE_DESCRIPTION].strip():
+            st.session_state[SS_USE_CASE_DESCRIPTION] = builder_narrative
+elif st.session_state[SS_LAST_SETUP_MODE] != setup_mode:
+    if setup_mode == "Free-Text Use Case":
+        st.session_state[SS_USE_CASE_DESCRIPTION] = ""
+    elif setup_mode == "Sample Template":
+        ch = st.session_state.get("gov_sample_use_case", SAMPLE_USE_CASE_PLACEHOLDER)
+        if ch and ch != SAMPLE_USE_CASE_PLACEHOLDER and ch in SAMPLE_USE_CASES:
+            st.session_state[SS_USE_CASE_DESCRIPTION] = SAMPLE_USE_CASES[ch]["description"]
+        else:
+            st.session_state[SS_USE_CASE_DESCRIPTION] = ""
+    elif setup_mode == "Build Custom Use Case" and builder_narrative:
+        st.session_state[SS_USE_CASE_DESCRIPTION] = builder_narrative
+    st.session_state[SS_LAST_SETUP_MODE] = setup_mode
+
+st.subheader("Use case description")
+if setup_mode == "Sample Template":
+    st.caption("Load a template above, then edit the text below before assessing.")
+elif setup_mode == "Build Custom Use Case":
+    st.caption(
+        "Draft is filled when you enter this mode or switch builder context; editing below is preserved until you **Regenerate**."
     )
-    narrative_plain = user_desc.strip()
+    if st.button("Regenerate draft from builder", type="secondary", key="gov_regenerate_builder_draft"):
+        st.session_state[SS_USE_CASE_DESCRIPTION] = build_use_case_description(
+            industry,
+            specialization,
+            business_function,
+            builder_use_case_type,
+            builder_primary_users,
+            list(builder_data_types_uc),
+            builder_model_pattern,
+            list(builder_capabilities),
+            builder_human_review,
+        ).strip()
+        st.rerun()
+else:
+    st.caption("Direct narrative entry; structured fields above still add tags and the technical block sent to the engine.")
+
+st.text_area(
+    "Describe the AI use case for governance review",
+    height=170,
+    key=SS_USE_CASE_DESCRIPTION,
+    placeholder=(
+        "Example: Hosted LLM copilot for service agents with read/write to CRM; may suggest refunds; "
+        "chats can contain account numbers and order history…"
+    ),
+)
+
+narrative_plain = (st.session_state.get(SS_USE_CASE_DESCRIPTION) or "").strip()
 
 with st.container(border=True):
     st.markdown("**Derived context preview** (what will shape tags and reviewer emphasis)")
