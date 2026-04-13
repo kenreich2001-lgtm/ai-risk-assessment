@@ -64,6 +64,15 @@ from intake_signals import (
     merge_intake_tags,
     tags_from_intake_signals,
 )
+from regulatory_intelligence import (
+    applicable_regulatory_context_summary,
+    enrich_remediation_gaps,
+    get_regulatory_overlay,
+    mapping_row_enrichment,
+    risk_domain_why_it_matters,
+    tag_all_material_risks,
+    themes_for_selected_regulations,
+)
 
 # Enterprise positioning (product copy — concise, no hype)
 TOOL_SUBTITLE = (
@@ -519,6 +528,18 @@ REMEDIATION_ACTION_COLS = [
     "remediation_priority",
 ]
 
+ENRICHED_REMEDIATION_COLS = [
+    "required_control",
+    "control_status",
+    "related_risks",
+    "remediation_action",
+    "remediation_priority_enriched",
+    "remediation_owner_suggested",
+    "governance_risk_tags_display",
+    "regulatory_context_display",
+    "enrichment_rationale",
+]
+
 
 def _rc_column_config(df: pd.DataFrame) -> dict:
     cfg: dict = {}
@@ -914,7 +935,51 @@ else:
         open_remediation_count=len(rem_rows),
     )
 
-    # --- 1 · Assessment metadata (at-a-glance strip) ---
+    overlay = get_regulatory_overlay(industry, specialization)
+    reg_themes_from_labels = themes_for_selected_regulations(regs_selected)
+    tagged_mm, risk_tags_by_id = tag_all_material_risks(
+        mm,
+        industry=industry,
+        specialization=specialization,
+        business_function=business_function,
+        selected_regulations=regs_selected,
+        derived_tags=derived_for_engine,
+    )
+    merged_reg_themes = list(
+        dict.fromkeys(list(overlay.get("regulatory_themes", ())) + reg_themes_from_labels)
+    )
+    gaps_raw = ar.get("gaps_and_remediation") or []
+    enriched_gaps = enrich_remediation_gaps(
+        gaps_raw,
+        risk_tags_by_id=risk_tags_by_id,
+        industry=industry,
+        specialization=specialization,
+        selected_regulations=regs_selected,
+        regulation_themes=merged_reg_themes,
+        overlay_frameworks=overlay.get("frameworks", ()),
+    )
+    app_reg_context_line = applicable_regulatory_context_summary(
+        industry, specialization, regs_selected
+    )
+    gov_row["applicable_regulatory_context"] = app_reg_context_line
+    gov_row["regulatory_overlay_frameworks"] = "; ".join(overlay.get("frameworks", ()))
+    gov_row["regulatory_themes_considered"] = "; ".join(merged_reg_themes)
+
+    risk_tag_summary_rows = [
+        {
+            "risk_name": r.get("risk_name", ""),
+            "governance_risk_tags": r.get("governance_risk_tags_display", ""),
+            "why_it_matters": risk_domain_why_it_matters(
+                r,
+                industry=industry,
+                specialization=specialization,
+                tags=r.get("governance_risk_tags") or [],
+            ),
+        }
+        for r in tagged_mm
+    ]
+
+    # --- 1 · Assessment metadata ---
     st.subheader("1 · Assessment metadata")
     with st.container(border=True):
         st.caption("Reference identifiers and routing for this draft assessment.")
@@ -922,10 +987,9 @@ else:
         a1.metric("Use case ID", assessment_id)
         a2.metric("Timestamp (UTC)", assessment_ts)
         a3.metric("Status", DEFAULT_ASSESSMENT_STATUS)
-        b1, b2, b3 = st.columns(3)
+        b1, b2 = st.columns(2)
         b1.metric("Risk tier (triage)", risk_tier)
         b2.markdown(f"**Recommended review path**  \n{review_path}")
-        b3.markdown(f"**Launch recommendation (demo)**  \n{html.escape(launch_recommendation)}")
 
     # --- 2 · Governance triage summary ---
     st.subheader("2 · Governance triage summary")
@@ -934,33 +998,12 @@ else:
             "Structured intake plus rule-based tiering (transparent bumps for regulation count and certain business functions). "
             "Catalog **overall risk** from the engine may differ; both appear under the use case summary."
         )
-        st.markdown("##### Risk tier rationale")
-        for line in tier_rationale_bullets:
-            st.markdown(f"- {line}")
-        st.divider()
-        st.markdown("##### Required reviewers")
-        st.caption("Illustrative roster from tier, tags, and regulatory context—adjust to your operating model.")
-        st.markdown(
-            "\n".join(f"- **{html.escape(r)}**" for r in required_reviewers),
-            unsafe_allow_html=True,
-        )
-        st.divider()
-        st.markdown("##### Launch recommendation")
-        if launch_recommendation == "Ready for standard review":
-            st.success(launch_recommendation)
-        elif launch_recommendation == "Not ready":
-            st.error(launch_recommendation)
-        elif launch_recommendation == "Escalate":
-            st.warning(launch_recommendation)
-        else:
-            st.info(launch_recommendation)
-        st.divider()
         g1, g2, g3 = st.columns(3)
         g1.metric("Use case ID", assessment_id)
         g2.metric("Timestamp (UTC)", assessment_ts)
         g3.metric("Status", DEFAULT_ASSESSMENT_STATUS)
         st.markdown(f"**Industry:** {industry}  \n**Specialization:** {specialization}  \n**Business function:** {business_function}")
-        st.markdown("**Relevant regulatory context considered**")
+        st.markdown("**Relevant regulatory context considered (intake selection)**")
         if regs_selected:
             st.write(", ".join(regs_selected))
         else:
@@ -985,20 +1028,46 @@ else:
     st.subheader("3 · Regulatory context summary")
     with st.container(border=True):
         st.info(
-            "This assessment uses selected industry and regulatory context to inform **risk prioritization**, **control emphasis**, "
-            "and **remediation guidance**. It does **not** determine legal compliance or full regulatory applicability."
+            "**Relevant regulatory context considered** — used to inform risk prioritization, control emphasis, tagging, and "
+            "remediation guidance. **It does not determine legal compliance** or full regulatory applicability."
         )
+        st.markdown("##### Industry / specialization overlay (curated, high-level)")
+        st.caption(
+            "Supervisory guidance, frameworks, and expectations commonly discussed in this domain—not an assertion that each item applies to your entity."
+        )
+        for line in overlay.get("frameworks", ()):
+            st.caption(f"• {line}")
+        st.markdown("##### Key regulatory themes (overlay)")
+        for line in overlay.get("regulatory_themes", ()):
+            st.caption(f"• {line}")
+        st.markdown("##### Control emphasis areas (overlay)")
+        for line in overlay.get("control_emphasis", ()):
+            st.caption(f"• {line}")
+        st.divider()
+        st.markdown("##### Themes linked to your selected regulations")
+        if reg_themes_from_labels:
+            for line in reg_themes_from_labels:
+                st.caption(f"• {line}")
+        else:
+            st.caption("Select regulations in intake to surface linked control / governance themes.")
+        st.divider()
         if regs_selected:
-            st.markdown("**Context items you selected**")
+            st.markdown("**Regulation labels you selected in intake**")
             for lab in regs_selected:
                 st.caption(f"• {lab}")
         else:
-            st.caption("No regulatory or standards context items selected—scope is intentionally narrow or TBD.")
+            st.caption("No regulatory or standards labels selected in intake—overlay above still frames domain expectations.")
         st.markdown("**Why this context matters (plain language)**")
         st.markdown(domain_rationale_md)
 
-    # --- 4 · Use case summary ---
-    st.subheader("4 · Use case summary")
+    # --- 4 · Risk tier rationale ---
+    st.subheader("4 · Risk tier rationale")
+    with st.container(border=True):
+        for line in tier_rationale_bullets:
+            st.markdown(f"- {line}")
+
+    # --- 5 · Use case summary ---
+    st.subheader("5 · Use case summary")
     with st.container(border=True):
         desc_clip = (narrative_plain[:400] + "…") if len(narrative_plain) > 400 else narrative_plain
         st.markdown("**Use case narrative (excerpt)**")
@@ -1023,20 +1092,41 @@ else:
             with st.expander("Executive narrative (assessment engine)", expanded=False):
                 st.markdown(es)
 
-    # --- 5 · Material risks identified ---
-    st.subheader("5 · Material risks identified")
+    # --- 6 · Material risks identified ---
+    st.subheader("6 · Material risks identified")
     r1, r2, r3, r4 = st.columns(4)
     r1.metric("Material risks", len(mm))
     r2.metric("Required controls", len(rc_rows))
     r3.metric("Open remediation rows", len(rem_rows))
     r4.metric("Risk–control mappings", len(table))
-    if mm:
-        st.dataframe(pd.DataFrame(mm), use_container_width=True, hide_index=True)
+    if tagged_mm:
+        mdf = pd.DataFrame(tagged_mm)
+        mcols = [c for c in mdf.columns if c not in ("governance_risk_tags",)]
+        st.dataframe(mdf[mcols], use_container_width=True, hide_index=True)
     else:
         st.caption("No material risks listed for this pass.")
 
-    # --- 6 · Required controls before deployment ---
-    st.subheader("6 · Required controls before deployment")
+    # --- 7 · Risk tags summary ---
+    st.subheader("7 · Risk tags summary")
+    st.caption(
+        "Deterministic governance / regulatory theme tags layered on engine material risks—transparent rules, not a compliance determination."
+    )
+    if risk_tag_summary_rows:
+        st.dataframe(
+            pd.DataFrame(risk_tag_summary_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "risk_name": st.column_config.TextColumn("Risk", width="medium"),
+                "governance_risk_tags": st.column_config.TextColumn("Tags", width="large"),
+                "why_it_matters": st.column_config.TextColumn("Why it matters here", width="large"),
+            },
+        )
+    else:
+        st.caption("No material risks to tag for this pass.")
+
+    # --- 8 · Required controls before deployment ---
+    st.subheader("8 · Required controls before deployment")
     if rc_rows:
         rcdf = pd.DataFrame(rc_rows)
         rccols = [c for c in REQUIRED_CONTROL_COLS if c in rcdf.columns]
@@ -1049,9 +1139,32 @@ else:
     else:
         st.caption("No required-control rows for this run.")
 
-    # --- 7 · Required remediation before validation ---
-    st.subheader("7 · Required remediation before validation")
-    if rem_rows:
+    # --- 9 · Required remediation before validation ---
+    st.subheader("9 · Required remediation before validation")
+    st.caption(
+        "Engine actions enriched with **suggested owner**, **priority**, **linked tags**, and **regulatory framing**—governance guidance only."
+    )
+    if enriched_gaps:
+        egdf = pd.DataFrame(enriched_gaps)
+        ecols = [c for c in ENRICHED_REMEDIATION_COLS if c in egdf.columns]
+        st.dataframe(
+            egdf[ecols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "remediation_action": st.column_config.TextColumn("Action", width="large"),
+                "related_risks": st.column_config.TextColumn("Related risks", width="medium"),
+                "enrichment_rationale": st.column_config.TextColumn("Rationale", width="large"),
+                "governance_risk_tags_display": st.column_config.TextColumn("Risk tags", width="medium"),
+                "regulatory_context_display": st.column_config.TextColumn("Regulatory context", width="medium"),
+            }
+            if "remediation_action" in egdf.columns
+            else {},
+        )
+    elif rem_rows:
+        st.info(
+            "Detailed gap rows were unavailable; showing **engine** remediation table without regulatory enrichment."
+        )
         remdf = pd.DataFrame(rem_rows)
         remcols = [c for c in REMEDIATION_ACTION_COLS if c in remdf.columns]
         st.dataframe(
@@ -1068,8 +1181,29 @@ else:
     else:
         st.caption("No open remediation rows for this pass.")
 
-    # --- 8 · Audit / review notes ---
-    st.subheader("8 · Audit & review notes")
+    # --- 10 · Required reviewers ---
+    st.subheader("10 · Required reviewers")
+    with st.container(border=True):
+        st.caption("Illustrative roster from tier, tags, and regulatory context—adjust to your operating model.")
+        st.markdown(
+            "\n".join(f"- **{html.escape(r)}**" for r in required_reviewers),
+            unsafe_allow_html=True,
+        )
+
+    # --- 11 · Launch recommendation ---
+    st.subheader("11 · Launch recommendation")
+    with st.container(border=True):
+        if launch_recommendation == "Ready for standard review":
+            st.success(launch_recommendation)
+        elif launch_recommendation == "Not ready":
+            st.error(launch_recommendation)
+        elif launch_recommendation == "Escalate":
+            st.warning(launch_recommendation)
+        else:
+            st.info(launch_recommendation)
+
+    # --- 12 · Audit / review notes ---
+    st.subheader("12 · Audit & review notes")
     with st.container(border=True):
         opinion = conc.get("readiness_opinion") or "—"
         st.markdown("**Readiness posture (design-time)**")
@@ -1083,8 +1217,8 @@ else:
         st.markdown("**Evidence expectations (engine)**")
         st.markdown(ar.get("evidence_for_audit_readiness") or "—")
 
-    # --- 9 · Downloadable detail ---
-    st.subheader("9 · Downloadable detail & technical appendix")
+    # --- 13 · Downloadable detail ---
+    st.subheader("13 · Downloadable detail & technical appendix")
     gov_summary_df = pd.DataFrame([gov_row])
     d1, d2 = st.columns([1, 2])
     with d1:
@@ -1098,7 +1232,17 @@ else:
     with d2:
         st.caption(
             "Columns include use_case_id, timestamp, status, industry, specialization, business_function, "
-            "selected_regulations, derived_context_tags, technical_intake_summary, category, risk_tier, review path, triage_rationale."
+            "selected_regulations, applicable_regulatory_context, regulatory overlay fields, derived_context_tags, "
+            "technical_intake_summary, category, risk_tier, review path, triage_rationale."
+        )
+    if enriched_gaps:
+        eg_sum = pd.DataFrame(enriched_gaps)
+        st.download_button(
+            "Download regulation-aware remediation (CSV)",
+            eg_sum.to_csv(index=False),
+            f"{assessment_id}_remediation_regulatory_enrichment.csv",
+            "text/csv",
+            use_container_width=True,
         )
 
     with st.expander("Engine use case narrative (reference)", expanded=False):
@@ -1108,8 +1252,8 @@ else:
         st.markdown("##### A. Use case summary")
         st.markdown(ar.get("use_case_summary") or "—")
         st.markdown("##### B. Most material risks")
-        if mm:
-            st.dataframe(pd.DataFrame(mm), use_container_width=True, hide_index=True)
+        if tagged_mm:
+            st.dataframe(pd.DataFrame(tagged_mm), use_container_width=True, hide_index=True)
         else:
             st.caption("—")
         st.markdown("##### C. Required controls")
@@ -1141,7 +1285,8 @@ else:
     if not table:
         st.caption("No risk–control mapping rows.")
     else:
-        df = pd.DataFrame(table)
+        enriched_mapping = mapping_row_enrichment(table, risk_tags_by_id, app_reg_context_line)
+        df = pd.DataFrame(enriched_mapping)
         for k, v in gov_row.items():
             df[k] = v
         cols_present = [c for c in DETAIL_VIEW_COLS if c in df.columns]
