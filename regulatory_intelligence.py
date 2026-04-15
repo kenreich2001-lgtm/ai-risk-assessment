@@ -342,9 +342,31 @@ def applicable_regulatory_context_summary(
 ) -> str:
     """Single-line summary for exports (not a legal determination)."""
     overlay = get_regulatory_overlay(industry, specialization)
-    parts = [f"{ind} / {spec}", "overlay: " + "; ".join(overlay.get("frameworks", ())[:6])]
-    if selected_regulation_labels:
-        parts.append("selected: " + "; ".join(selected_regulation_labels[:8]))
+
+    parts: list[str] = []
+
+    domain = " / ".join(
+        str(v).strip() for v in (industry, specialization) if v and str(v).strip()
+    )
+    if domain:
+        parts.append(domain)
+
+    frameworks = [
+        str(x).strip()
+        for x in overlay.get("frameworks", ())[:6]
+        if x and str(x).strip()
+    ]
+    if frameworks:
+        parts.append("overlay: " + "; ".join(frameworks))
+
+    selected = [
+        str(x).strip()
+        for x in selected_regulation_labels[:8]
+        if x and str(x).strip()
+    ]
+    if selected:
+        parts.append("selected: " + "; ".join(selected))
+
     return " | ".join(parts)
 
 
